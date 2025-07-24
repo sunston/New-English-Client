@@ -1,0 +1,300 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Interviewer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        #auth-section, #interview-section {
+            margin: 20px 0;
+        }
+        #conversation-log {
+            border: 1px solid #ccc;
+            padding: 10px;
+            height: 300px;
+            overflow-y: scroll;
+            text-align: left;
+        }
+        #timer {
+            font-size: 24px;
+            margin: 20px 0;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+        }
+        #user-input {
+            width: 80%;
+            padding: 10px;
+            font-size: 16px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div id="auth-section">
+        <h2>Login</h2>
+        <input type="text" id="username" placeholder="Username" required>
+        <input type="password" id="password" placeholder="Password" required>
+        <button onclick="authenticate()">Login</button>
+        <p id="auth-error" style="color: red;"></p>
+    </div>
+    <div id="chat-section" style="display: none;">
+        <h2>Text Chat</h2>
+        <div id="conversation-log"></div>
+        <input type="text" id="user-input" placeholder="Type your message here">
+        <button onclick="submitResponse()" id="submit-button">Send</button>
+        <br>
+        <button onclick="toggleAudioRecording()" id="audio-button">Start Voice Recording</button>
+    </div>
+
+    <script>
+        let isAuthenticated = false;
+        let threadId = null; // Store thread_id
+        let jwtToken = null; // Store JWT token after authentication
+        let isRecording = false;
+        let recognition = null;
+
+        async function authenticate() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+            const errorDiv = document.getElementById('auth-error');
+
+            try {
+                const response = await fetch('https://new-english-api.onrender.com/authenticate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include',
+                    body: JSON.stringify({ username, password })
+                });
+                const result = await response.json();
+                if (response.ok) {
+                    document.getElementById('auth-section').style.display = 'none';
+                    document.getElementById('chat-section').style.display = 'block';
+                    logToConversation('System', 'Authentication successful.');
+                    isAuthenticated = true;
+                    jwtToken = result.token || null; // Save JWT token if returned
+                } else {
+                    errorDiv.textContent = result.detail;
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Authentication error: ' + error.message;
+            }
+        }
+
+        async function submitResponse() {
+            const text = document.getElementById('user-input').value.trim();
+            if (!text || !isAuthenticated) return;
+            document.getElementById('user-input').value = '';
+            logToConversation('User', text);
+
+            let payload = { text };
+            if (threadId) payload.thread_id = threadId;
+
+            try {
+                const resp = await fetch('https://new-english-api.onrender.com/interview', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    credentials: 'include', // <-- Important: send cookies!
+                    body: JSON.stringify(payload)
+                });
+
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    throw new Error(err.detail || resp.statusText);
+                }
+
+                const result = await resp.json();
+
+                if (result.thread_id) threadId = result.thread_id;
+
+                logToConversation('Assistant', result.reply || JSON.stringify(result));
+            } catch (e) {
+                logToConversation('System', `Error: ${e.message}`);
+            }
+        }
+
+        function logToConversation(role, message) {
+            const logDiv = document.getElementById('conversation-log');
+            //const timestamp = new Date().toLocaleString();
+            //const entry = `[${timestamp}] ${role}: ${message}<br>`;
+
+            let entry = '';
+
+            if (role === 'User') {
+                entry = `You: ${message}<br>`;
+            } else if (role === 'Assistant') {
+                let msgText = message;
+                try {
+                    const obj = typeof message === 'string' ? JSON.parse(message) : message;
+                    if (obj && obj.text) msgText = obj.text;
+                } catch (e) {
+                    // Not JSON, use as is
+                }
+                entry = `Officer: ${msgText}<br>`;
+            } else {
+                // Skip system messages
+                return;
+            }
+
+            logDiv.innerHTML += entry;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function startTimer() {
+            timerInterval = setInterval(() => {
+                const timerDiv = document.getElementById('timer');
+                const time = timerDiv.textContent.split(':');
+                let seconds = parseInt(time[0]) * 60 + parseInt(time[1]);
+                if (seconds <= 0) {
+                    endInterview();
+                    return;
+                }
+                seconds--;
+                timerDiv.textContent = `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, '0')}`;
+            }, 1000);
+        }
+
+        function updateTimer(seconds) {
+            const timerDiv = document.getElementById('timer');
+            timerDiv.textContent = `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
+            if (seconds <= 0) {
+                endInterview();
+            }
+        }
+
+        function endInterview() {
+            if (socket) socket.close();
+            clearInterval(timerInterval);
+            isInterviewActive = false;
+            document.getElementById('start-button').style.display = 'inline';
+            document.getElementById('user-input').style.display = 'none';
+            document.getElementById('submit-button').style.display = 'none';
+        }
+
+        function toggleAudioRecording() {
+            if (!isAuthenticated) {
+                logToConversation('System', 'Please login first.');
+                return;
+            }
+
+            if (isRecording) {
+                stopSpeechRecognition();
+            } else {
+                startSpeechRecognition();
+            }
+        }
+
+        function startSpeechRecognition() {
+            // Check for browser support
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            
+            if (!SpeechRecognition) {
+                logToConversation('System', 'Speech recognition not supported in this browser. Please use Chrome, Firefox, Safari, or Edge.');
+                return;
+            }
+
+            recognition = new SpeechRecognition();
+            
+            // Configure recognition settings
+            recognition.continuous = false; // Stop after one result
+            recognition.interimResults = false; // Only final results
+            recognition.lang = 'en-US'; // Set language to English
+            recognition.maxAlternatives = 1; // Only one alternative result
+
+            recognition.onstart = function() {
+                isRecording = true;
+                document.getElementById('audio-button').textContent = 'Stop Recording';
+                logToConversation('System', 'Listening... Please speak now.');
+            };
+
+            recognition.onresult = function(event) {
+                const transcript = event.results[0][0].transcript;
+                logToConversation('System', 'Speech recognized: "' + transcript + '"');
+                
+                // Set the recognized text in the input field
+                document.getElementById('user-input').value = transcript;
+                
+                // Automatically submit the response
+                submitResponse();
+            };
+
+            recognition.onerror = function(event) {
+                logToConversation('System', 'Speech recognition error: ' + event.error);
+                isRecording = false;
+                document.getElementById('audio-button').textContent = 'Start Voice Recording';
+            };
+
+            recognition.onend = function() {
+                isRecording = false;
+                document.getElementById('audio-button').textContent = 'Start Voice Recording';
+                logToConversation('System', 'Speech recognition ended.');
+            };
+
+            // Start recognition
+            try {
+                recognition.start();
+            } catch (error) {
+                logToConversation('System', 'Error starting speech recognition: ' + error.message);
+                isRecording = false;
+            }
+        }
+
+        function stopSpeechRecognition() {
+            if (recognition) {
+                recognition.stop();
+                isRecording = false;
+                document.getElementById('audio-button').textContent = 'Start Voice Recording';
+                logToConversation('System', 'Speech recognition stopped.');
+            }
+        }
+    </script>
+</body>
+</html>
