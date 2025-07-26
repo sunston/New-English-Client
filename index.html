@@ -170,7 +170,7 @@
             let entry = '';
 
             if (role === 'User') {
-                entry = `You: ${message}<br>`;
+                entry = `<strong>You:</strong> ${message}<br>`;
             } else if (role === 'Assistant') {
                 let msgText = message;
                 try {
@@ -179,7 +179,7 @@
                 } catch (e) {
                     // Not JSON, use as is
                 }
-                entry = `Tutor: ${msgText}<br>`;
+                entry = `<strong>Tutor:</strong> ${msgText}<br>`;
             } else {
                 // Skip system messages
                 return;
